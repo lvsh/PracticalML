@@ -1,0 +1,176 @@
+---
+title: "Practical Machine Learning Course Project"
+output: html_document
+---
+
+### Background
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit, it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement – a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify *how well they do it*.
+
+The goal of this project was to predict to the quality of exercise using the Weight Lifting Exercise Dataset from <http://groupware.les.inf.puc-rio.br/har>. This dataset consists of measurements taken from six participants who performed barbell lifts correctly (class 'A') and incorrectly (classes 'B', 'C', 'D', and 'E'). Measurements included accelerometer, gyroscope, and magnetometer readings from the participants' armband, glove, belt, and barbell. We combined these measurements to predict the type of lift the participants performed (A-F).
+
+### Feature selection
+
+**In this section, we show how to reduce the number of features from 159 down to 34.**
+
+We start by loading the training set given to us. 
+
+```{r loaddata,cache=TRUE}
+training <- read.csv("pml-training.csv")
+dim(training)
+colnames(training)[160]
+```
+
+We see that the training set has `r nrow(training)` measurements and `r ncol(training)-1` features (the last column is the class label). Let's check if any of these features are empty. 
+
+```{r findempty}
+ef <- lapply(lapply(training,is.na),sum)
+ef <- 100*as.numeric(ef)/nrow(training)
+table(ef>0)
+```
+
+```{r emptyplot,echo=FALSE,fig.height=2.5}
+library(ggplot2)
+etemp <- as.data.frame(ef)
+colnames(etemp)[1] <- "ef"
+p <- ggplot(etemp,aes(x=ef)) + geom_histogram(binwidth=5,fill='cornflowerblue') 
+p <- p + labs(x="Percentage NAs in a feature (ef)",y="Number of features")
+print(p)
+```
+
+We see that `r sum(ef>0)` features are almost entirely empty, i.e., full of NAs. We remove these from further consideration. 
+
+```{r removeempty}
+empty_features <- ef>0
+reduced_set <- training[,!empty_features]
+```
+
+Next, let's find features that are nearly zero. These features have very low variance, and are unlikely to be useful.
+
+```{r findnearzero}
+library(caret)
+nzv_features <- nearZeroVar(reduced_set)
+```
+
+These near-zero features contain only a small number of unique values (< 450) relative to the size of feature (`r nrow(reduced_set)`). Therefore, we can remove them from further consideration.
+
+```{r plotnearzero,echo=FALSE,fig.height=2.5}
+currf <- as.numeric(lapply(lapply(reduced_set[,nzv_features],unique),length))
+ntemp <- as.data.frame(currf)
+#nzf <- rep(2,times=ncol(reduced_set))
+#nzf[nzv_features] <- 1
+#ntemp <- as.data.frame(cbind(currf,nzf))
+colnames(ntemp)[1] <- "numUnique"
+#colnames(ntemp)[2] <- "groupFeature"
+#ntemp$groupFeature <- as.factor(ntemp$groupFeature)
+#levels(ntemp$groupFeature) <- c("Near-zero features","Remaining features")
+p <- ggplot(ntemp,aes(x=numUnique)) + geom_histogram(binwidth=20,fill='cornflowerblue') 
+p <- p + labs(x="# Unique values in a feature",y="Number of features") 
+print(p)
+```
+
+Finally, we look at features that are highly correlated with each other. 
+
+```{r findcorr}
+reduced_set <- reduced_set[,-nzv_features] # Remove near zero features
+reduced_set_M <- data.matrix(reduced_set[,7:58]) # Remove factor variables user_name, timestamps, new_window, and classe
+corrMatrix <- cor(reduced_set_M)
+highCorr <- findCorrelation(corrMatrix, cutoff=0.75)
+```
+
+As an example, we plot three of these features (`accel_belt_x`,`accel_belt_y`, and `accel_belt_z`) against each other. It is easy to see that they are highly correlated. Therefore, it makes sense to remove such features from further consideration.
+
+```{r plotcorr,echo=FALSE,fig.height=2.5}
+p <- ggplot(reduced_set,aes(x=accel_belt_x,y=accel_belt_y)) + geom_point(aes(color=accel_belt_z)) 
+print(p)
+```
+
+```{r finalfeatures}
+# Remove corelated features, and retain some factor variables we had previously ignored
+keep_features <- c("user_name","num_window",colnames(reduced_set_M)[-highCorr])
+feature_names <- colnames(training)
+selectedFeatures <- pmatch(keep_features,feature_names)
+length(keep_features)
+keep_features
+```
+
+### Split training data
+
+Now that we have chosen the features, let us partition the training data using **2-fold cross validation**. We consider two equal sets (`trainSet` and `validSet`). We will train our model on one set and evaluate on the other to estimate the out-of-sample error.
+
+NOTE: To speed up the execution, we will only consider half the training set here for purposes of demonstration. On a faster machine, we would consider the full training set. 
+
+```{r splitdata}
+set.seed(1234)
+# To speed things up, only consider half the dataset
+inConsideration <- createDataPartition(y=training$classe,p=0.5,list=FALSE)
+trainSmall <- training[inConsideration,]
+# Split further into training and validation sets
+inTrain <- createDataPartition(y=trainSmall$classe,p=0.5,list=FALSE)
+trainSet <- trainSmall[inTrain,]
+valSet <- trainSmall[-inTrain,]
+```
+
+### Apply random forest classifier
+#### 1st fold
+Next, we fit a random forest classifier to the selected features in `trainSet`. 
+
+```{r modeldata1,cache=TRUE}
+trainfeatures <- trainSet[,selectedFeatures] 
+trainresponse <- trainSet$classe
+modfit <- train(trainfeatures,trainresponse,method="rf",prox=TRUE,ntree=10)
+modfit
+```
+
+Having trained the model on `trainSet`, let us evaluate the in-sample errors. The overall in-sample accuracy is **99.98%**.
+
+```{r modeldata2}
+pred <- predict(modfit,trainfeatures)
+confusionMatrix(pred,trainresponse)
+```
+
+But what about the out-of-sample errors? We run the model trained on `trainSet` on the held out `validationSet` to estimate the out-of-sample error. We see that the overall out-of-sample accuracy is **98.12%**! 
+
+```{r modeldata3}
+valfeatures <- valSet[,selectedFeatures]  
+valresponse <- valSet$classe
+pred <- predict(modfit,valfeatures)
+confusionMatrix(pred,valresponse)
+```
+
+Given the impressive out-of-sample accuracy, it appears that our random forest classifier has learnt something useful. Let's see which features the model found most useful.
+
+```{r modeldata4}
+plot(varImp(modfit))
+```
+
+#### 2nd fold
+
+Let us now swap the `trainSet` and `valSet` roles, i.e., train on `valSet` and test on `trainSet`.
+
+```{r modeldata5,cache=TRUE}
+modfit2 <- train(valfeatures,valresponse,method="rf",prox=TRUE,ntree=10)
+modfit2
+```
+
+Let us evaluate in-sample and out-of-sample errors for this model. We see that the in-sample accuracy is **99.98%** and out-of-sample accuracy is **98.43%**. These numbers are similar to what we observed in the first fold. 
+
+```{r modeldata6}
+# In-sample error
+pred <- predict(modfit2,valfeatures) 
+confusionMatrix(pred,valresponse)
+# Out-of-sample error
+pred <- predict(modfit2,trainfeatures) 
+confusionMatrix(pred,trainresponse)
+```
+
+Let's see which features this model found most useful. We see that this set of features agrees with that of the other models (previous plot).
+
+```{r modeldata7}
+plot(varImp(modfit2))
+```
+
+
+### Conclusions
+
+We built a random forest classifier to predict the quality of exercise in the Weight Lifting Exercise Dataset. We evaluated the classifier using two-fold cross validation, and estimated the out-of-sample error rate to be 100 - (98.43 + 98.12)/2 = **1.725%**. Note that this value is much less than chance error rate 100*5/6 = 83.33%. Therefore, we expect the classifier performance to generalize well to new samples from the Weight Lifting Exercise Dataset. 
